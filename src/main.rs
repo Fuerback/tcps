@@ -31,7 +31,16 @@ async fn status() -> impl Responder {
 #[get("/start/{port}")]
 async fn start(path: web::Path<String>) -> impl Responder {
     let port = path.into_inner();
-    let listener = TcpListener::bind(format!("127.0.0.1:{port}")).unwrap();
+    let addr = format!("127.0.0.1:{port}");
+    info!("Starting TCP server at {addr}");
+    let listener = TcpListener::bind(&addr);
+    if let Err(e) = listener {
+        let err_msg = format!("Cannot start a new TCP server at {addr}. Error: {e}");
+        error!("{err_msg}");
+        return HttpResponse::InternalServerError().body(err_msg);
+    }
+
+    let listener = listener.unwrap();
 
     thread::spawn(move || {
         for stream in listener.incoming() {
