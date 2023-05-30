@@ -1,7 +1,9 @@
 #[macro_use]
 extern crate log;
 
-use actix_web::{get, middleware::Logger, put, web, App, HttpResponse, HttpServer, Responder};
+use actix_web::{
+    delete, get, middleware::Logger, put, web, App, HttpResponse, HttpServer, Responder,
+};
 use bus::Bus;
 use crossbeam_channel::{unbounded, Sender};
 use env_logger::Env;
@@ -13,10 +15,13 @@ use std::{
     time::Duration,
 };
 
+#[derive(Debug)]
 enum Action {
     Start(TcpListener),
+    Close,
 }
 
+#[derive(Debug)]
 struct Command {
     port: u16,
     action: Action,
@@ -32,14 +37,17 @@ struct AppData {
 async fn main() -> std::io::Result<()> {
     env_logger::init_from_env(Env::default().default_filter_or("info"));
     let (tx, rx) = unbounded();
+    // TODO: Change it, bus capacity must be a variable.
     let mut bus_close = Bus::<u16>::new(100);
     let servers = Arc::new(Mutex::new(Vec::new()));
-    let cloned_servers = servers.clone();
+    let serv_clon = servers.clone();
     info!("Bootstrapping the application");
 
     thread::spawn(move || loop {
         // TODO: Handle this error later.
-        let command: Command = rx.recv().unwrap();
+        let command: Command = rx.recv().expect("Cannot extract Command");
+
+        let cloned_servers = serv_clon.clone();
         match command.action {
             Action::Start(l) => {
                 let p = command.port;
@@ -50,41 +58,48 @@ async fn main() -> std::io::Result<()> {
                 l.set_nonblocking(true).expect("error on set non-blocking");
                 info!("Calling incoming...");
 
-                for stream in l.incoming() {
-                    {
-                        // TODO: Handle it later properly.
-                        let mut v = cloned_servers.lock().unwrap();
-                        if !v.contains(&p) {
-                            info!("Server added at {addr}");
-                            v.push(p);
-                        }
-                    }
-
-                    match stream {
-                        Ok(_s) => {
-                            // do something with the TcpStream
-                            //handle_connection(s);
-                        }
-                        Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                            if let Ok(close_port) =
-                                close_rx.recv_timeout(Duration::from_millis(100))
-                            {
-                                if close_port == p {
-                                    info!("Closing server at 127.0.0.1:{p}");
-                                    cloned_servers.lock().unwrap().remove(p.into());
-                                    break;
-                                }
+                thread::spawn(move || {
+                    for stream in l.incoming() {
+                        {
+                            // TODO: Handle it later properly.
+                            let mut v = cloned_servers.lock().unwrap();
+                            if !v.contains(&p) {
+                                info!("Server added at {addr}");
+                                v.push(p);
                             }
-                            continue;
                         }
-                        Err(e) => {
-                            // TODO: Handle this error later.
-                            info!("Server removed at {addr}");
-                            cloned_servers.lock().unwrap().retain(|&x| x != p);
-                            panic!("encountered IO error: {e}");
+
+                        match stream {
+                            Ok(_s) => {
+                                // do something with the TcpStream
+                                //handle_connection(s);
+                            }
+                            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                                if let Ok(close_port) =
+                                    close_rx.recv_timeout(Duration::from_millis(100))
+                                {
+                                    if close_port == p {
+                                        info!("Command Close has been received at {addr}");
+                                        cloned_servers.lock().unwrap().retain(|&x| x != p);
+                                        break;
+                                    }
+                                }
+                                continue;
+                            }
+                            Err(e) => {
+                                // TODO: Handle this error later.
+                                info!("Server removed at {addr}");
+                                cloned_servers.lock().unwrap().retain(|&x| x != p);
+                                panic!("encountered IO error: {e}");
+                            }
                         }
                     }
-                }
+                });
+            }
+            Action::Close => {
+                let p = command.port;
+                info!("Broadcasting close command for port: {p}");
+                bus_close.broadcast(p);
             }
         }
     });
@@ -102,6 +117,7 @@ async fn main() -> std::io::Result<()> {
             .service(status)
             .service(get_servers)
             .service(start)
+            .service(close)
     })
     .bind(("127.0.0.1", 8080))?
     .run()
@@ -120,7 +136,7 @@ async fn get_servers(data: web::Data<AppData>) -> impl Responder {
     HttpResponse::Ok().body(format!("Servers: {:?}", servers))
 }
 
-#[put("/servers/{port}")]
+#[put("/server/{port}")]
 async fn start(data: web::Data<AppData>, path: web::Path<u16>) -> impl Responder {
     let tx = data.tx.clone();
     let port = path.into_inner();
@@ -141,4 +157,19 @@ async fn start(data: web::Data<AppData>, path: web::Path<u16>) -> impl Responder
     .unwrap();
 
     HttpResponse::Ok().body("Server is running")
+}
+
+#[delete("/server/{port}")]
+async fn close(data: web::Data<AppData>, path: web::Path<u16>) -> impl Responder {
+    let tx = data.tx.clone();
+    let port = path.into_inner();
+    info!("Closing server at 127.0.0.1:{port}");
+
+    tx.send(Command {
+        port: port,
+        action: Action::Close,
+    })
+    .unwrap();
+
+    HttpResponse::Accepted().body("Close command has been sent.")
 }
