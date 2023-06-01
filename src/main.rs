@@ -4,12 +4,13 @@ extern crate log;
 use actix_web::{
     delete, get, middleware::Logger, put, web, App, HttpResponse, HttpServer, Responder,
 };
-use bus::Bus;
+use bus::{Bus, BusReader};
 use crossbeam_channel::{unbounded, Sender};
 use env_logger::Env;
 use std::{
     io,
-    net::TcpListener,
+    io::{Read, Write},
+    net::{TcpListener, TcpStream},
     sync::{Arc, Mutex},
     thread,
     time::Duration,
@@ -35,62 +36,61 @@ struct AppData {
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    env_logger::init_from_env(Env::default().default_filter_or("info"));
+    env_logger::init_from_env(Env::default().default_filter_or("debug"));
     let (tx, rx) = unbounded();
     // TODO: Change it, bus capacity must be a variable.
-    let mut bus_close = Bus::<u16>::new(100);
+    let bus_close = Arc::new(Mutex::new(Bus::<u16>::new(100)));
     let servers = Arc::new(Mutex::new(Vec::new()));
     let serv_clon = servers.clone();
+    let bus_close_clone = bus_close.clone();
     info!("Bootstrapping the application");
 
     thread::spawn(move || loop {
         // TODO: Handle this error later.
         let command: Command = rx.recv().expect("Cannot extract Command");
 
-        let cloned_servers = serv_clon.clone();
+        let servers = serv_clon.clone();
+        let bus_close = bus_close_clone.clone();
         match command.action {
             Action::Start(l) => {
                 let p = command.port;
                 let addr = format!("127.0.0.1:{p}");
-                let mut close_rx = bus_close.add_rx();
+                let mut acpt_close_rx = bus_close.lock().unwrap().add_rx();
                 // TODO: Handle this error later.
-                info!("Setting nonblocking for server ");
                 l.set_nonblocking(true).expect("error on set non-blocking");
-                info!("Calling incoming...");
 
                 thread::spawn(move || {
                     for stream in l.incoming() {
                         {
                             // TODO: Handle it later properly.
-                            let mut v = cloned_servers.lock().unwrap();
+                            let mut v = servers.lock().unwrap();
                             if !v.contains(&p) {
                                 info!("Server added at {addr}");
                                 v.push(p);
                             }
                         }
 
+                        let stream_close_rx = bus_close.lock().unwrap().add_rx();
                         match stream {
-                            Ok(_s) => {
-                                // do something with the TcpStream
-                                //handle_connection(s);
+                            Ok(s) => {
+                                handle_connection(p, s, stream_close_rx, servers.clone());
                             }
                             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                                 if let Ok(close_port) =
-                                    close_rx.recv_timeout(Duration::from_millis(100))
+                                    acpt_close_rx.recv_timeout(Duration::from_millis(10))
                                 {
                                     if close_port == p {
-                                        info!("Command Close has been received at {addr}");
-                                        cloned_servers.lock().unwrap().retain(|&x| x != p);
+                                        info!("Command Close has been received. Closing connection at {addr}.");
+                                        servers.lock().unwrap().retain(|&x| x != p);
                                         break;
                                     }
                                 }
                                 continue;
                             }
                             Err(e) => {
-                                // TODO: Handle this error later.
-                                info!("Server removed at {addr}");
-                                cloned_servers.lock().unwrap().retain(|&x| x != p);
-                                panic!("encountered IO error: {e}");
+                                servers.lock().unwrap().retain(|&x| x != p);
+                                error!("Encountered IO error while accepting connection at {addr}. Error: {e}");
+                                break;
                             }
                         }
                     }
@@ -99,7 +99,10 @@ async fn main() -> std::io::Result<()> {
             Action::Close => {
                 let p = command.port;
                 info!("Broadcasting close command for port: {p}");
-                bus_close.broadcast(p);
+                {
+                    let mut bus = bus_close_clone.lock().unwrap();
+                    bus.broadcast(p);
+                }
             }
         }
     });
@@ -122,6 +125,43 @@ async fn main() -> std::io::Result<()> {
     .bind(("127.0.0.1", 8080))?
     .run()
     .await
+}
+
+fn handle_connection(
+    port: u16,
+    mut stream: TcpStream,
+    mut close_rx: BusReader<u16>,
+    servers: Arc<Mutex<Vec<u16>>>,
+) {
+    let addr = format!("127.0.0.1:{port}");
+    loop {
+        let mut read = [0; 5];
+        match stream.read(&mut read) {
+            Ok(n) => {
+                if n == 0 {
+                    info!("No further bytes to read. TCP connection was closed at {addr}.");
+                    break;
+                }
+                // TODO: Handle stream here. Echo probe and discard non-probe.
+                stream.write(&read[0..n]).unwrap();
+            }
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                if let Ok(close_port) = close_rx.recv_timeout(Duration::from_millis(10)) {
+                    if close_port == port {
+                        info!("Command Close has been received. Closing stream at {addr}.");
+                        servers.lock().unwrap().retain(|&x| x != port);
+                        break;
+                    }
+                }
+                continue;
+            }
+            Err(e) => {
+                servers.lock().unwrap().retain(|&x| x != port);
+                error!("Encountered IO error reading the stream at {addr}. Error: {e}");
+                break;
+            }
+        }
+    }
 }
 
 #[get("/status")]
