@@ -108,7 +108,7 @@ async fn main() -> std::io::Result<()> {
     });
 
     let app_data = AppData {
-        servers: servers,
+        servers,
         tx: tx.clone(),
     };
 
@@ -191,7 +191,7 @@ async fn start(data: web::Data<AppData>, path: web::Path<u16>) -> impl Responder
 
     let listener = listener.unwrap();
     tx.send(Command {
-        port: port,
+        port,
         action: Action::Start(listener),
     })
     .unwrap();
@@ -206,7 +206,7 @@ async fn close(data: web::Data<AppData>, path: web::Path<u16>) -> impl Responder
     info!("Closing server at 127.0.0.1:{port}");
 
     tx.send(Command {
-        port: port,
+        port,
         action: Action::Close,
     })
     .unwrap();
