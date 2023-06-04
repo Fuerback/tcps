@@ -143,7 +143,7 @@ fn handle_connection(
                     break;
                 }
                 // TODO: Handle stream here. Echo probe and discard non-probe.
-                stream.write(&read[0..n]).unwrap();
+                stream.write_all(&read[0..n]).unwrap();
             }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                 if let Ok(close_port) = close_rx.recv_timeout(Duration::from_millis(10)) {
