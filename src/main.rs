@@ -10,6 +10,10 @@ use crossbeam_channel::{unbounded, Sender};
 use env_logger::Env;
 use std::sync::{Arc, Mutex};
 
+// TODO:
+// - Change the API. From /servers to /listeners;
+// - Sockets can be: /connections or /sockets;
+
 #[derive(Clone)]
 struct AppData {
     servers: Arc<Mutex<Vec<u16>>>,

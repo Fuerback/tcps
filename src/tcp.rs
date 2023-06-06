@@ -10,15 +10,15 @@ use std::{
 };
 
 #[derive(Debug)]
-pub enum Action {
-    Start(TcpListener),
-    Close,
+pub struct Command {
+    port: u16,
+    action: Action,
 }
 
 #[derive(Debug)]
-pub struct Command {
-    pub port: u16,
-    pub action: Action,
+enum Action {
+    Start(TcpListener),
+    Close,
 }
 
 pub async fn close(port: u16, tx: Sender<Command>) {
@@ -133,16 +133,35 @@ fn handle_connection(
 ) -> Result<(), String> {
     let addr = format!("127.0.0.1:{port}");
     loop {
-        let mut read = [0; 5];
+        let mut read = [0; 100];
         match stream.read(&mut read) {
             Ok(n) => {
                 if n == 0 {
-                    return Err(format!(
-                        "No further bytes to read. TCP connection was closed at {addr}."
-                    ));
+                    info!("No further bytes to read. TCP connection was closed at {addr}.");
+                    return Ok(());
                 }
+                let is_probe = read[6] == 0xE2;
+                // TODO: Implement EBCDIC library here.
+                if is_probe {
+                    // Cleaning the buffer
+                    let mut resp = vec![];
+                    let filler = [0; 94];
+                    //let probe_payload: [u8; 5] = [0xD7, 0xD9, 0xD6, 0xC2, 0xC5];
+                    let filler_payload: [u8; 5] = [0xD9, 0xD9, 0xD6, 0xC2, 0xC5];
+                    resp.extend_from_slice(&read[0..6]);
+                    resp.extend_from_slice(&filler);
+                    //resp.extend_from_slice(&probe_payload);
+                    resp.extend_from_slice(&filler_payload);
+                    let mut clear = [0; 5];
+                    stream.read(&mut clear).unwrap();
+
+                    info!("Probe message detected. Just echoing...");
+                    stream.write_all(&resp).unwrap();
+                    continue;
+                }
+                error!("Message type not supported yet.");
+
                 // TODO: Handle stream here. Echo probe and discard non-probe.
-                stream.write_all(&read[0..n]).unwrap();
             }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                 if let Ok(close_port) = close_rx.recv_timeout(Duration::from_millis(10)) {
@@ -155,6 +174,7 @@ fn handle_connection(
                 continue;
             }
             Err(e) => {
+                // TODO: Should not stop the listener.
                 return Err(format!(
                     "Encountered IO error reading the stream at {addr}. Error: {e}"
                 ));
